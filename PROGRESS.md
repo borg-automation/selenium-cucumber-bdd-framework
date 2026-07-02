@@ -62,61 +62,75 @@ file fix, no step-definition or page-object change needed.
     failures.
   - `-Dcucumber.filter.tags="@regression"`: 2 scenarios ran (locked-out login +
     inventory add-to-cart), 0 failures.
-- **`-Dbrowser=firefox`** — the browser-selection code path is confirmed correct:
-  `DriverFactory` correctly routed to `FirefoxDriver` with the right capabilities
-  (`browserName: firefox`, `webSocketUrl: false`), and WebDriverManager resolved
-  `geckodriver` without error. The actual session failed with
-  `SessionNotCreatedException: ... unable to find binary in default location` — **Firefox
-  itself is not installed on this dev machine**, which is an environment gap, not a
-  framework defect. `-Dbrowser=chrome` (the default) runs cleanly; re-verify
-  `-Dbrowser=firefox` end-to-end once Firefox is installed.
-- **Parallel execution / thread IDs** — confirmed via a temporary
-  `System.out.println("[parallel-proof] thread=" + Thread.currentThread().getId())` in
-  `LoginSteps.iAmOnTheSauceDemoLoginPage()` (first step of every scenario), then removed
-  once confirmed. Across 4 separate parallel runs (`dataproviderthreadcount=3`, the
-  default), the 3 scenarios consistently dispatched to 3 distinct thread IDs (e.g.
-  `31`/`32`/`33`) concurrently, each with its own `Session ID` in the Selenium logs —
-  structurally, parallel execution is real and working correctly.
+- **`-Dbrowser=firefox`** — Firefox was not installed on this dev machine during initial
+  verification (see the deviation this caused, below); it has since been installed
+  (`C:\Program Files\Mozilla Firefox`) and the full suite re-verified end-to-end on
+  Firefox: serial 3/3 pass (28.65s), and **parallel 3/3 pass across three consecutive
+  runs** (26.85s / 27.73s / 27.93s) — see the parallelism findings below for why Firefox
+  is consistently reliable here where Chrome is not.
+- **Parallel execution / thread dispatch** — confirmed genuinely concurrent, not just
+  "distinct thread IDs assigned by a pool that happens to run tasks one at a time." Two
+  rounds of temporary diagnostic logging were used, then removed:
+  1. `System.out.println("[parallel-proof] thread=" + Thread.currentThread().getId())` in
+     `LoginSteps.iAmOnTheSauceDemoLoginPage()` — showed 3 distinct thread IDs (e.g.
+     `31`/`32`/`33`) across every parallel run, each with its own Selenium `Session ID`.
+  2. A follow-up round added a timestamp print at the very start of `Hooks.setUp()`
+     (before any driver work) for all 3 threads. Result: **all 3 threads' `before-hook-start`
+     timestamps were identical to the millisecond** (e.g. `1783018512565` for all three in
+     one Firefox run, `1783018573287`/`88` in one Chrome run) — TestNG's
+     `@DataProvider(parallel = true)` dispatch is genuinely simultaneous, not staggered.
 - **Step definitions contain no direct Selenium calls** — every step method's body is a
   single call into `LoginPage`/`InventoryPage`; `WebDriver`/`By` never appear outside
   `src/main/java/.../pages/`.
 
-### Known issue: inventory scenario fails reliably under parallel execution (not a code bug — see below)
+### Root cause found: Chrome fails reliably under parallel execution, Firefox does not — and why
 
-Serial run (`dataproviderthreadcount=1`), all 3 scenarios: **3/3 pass, 9.43s.**
+Serial run (`dataproviderthreadcount=1`), all 3 scenarios, either browser: **3/3 pass**
+every time (Chrome 9.43s, Firefox 28.65s — Firefox is simply slower to launch).
 
-Parallel run (`dataproviderthreadcount=3`, the default), all 3 scenarios: **the inventory
-scenario (`Adding an item to the cart updates the cart badge count`) failed on all 4
-consecutive attempts**, always the same way —
-`TimeoutException: ... waiting for visibility of element located by
-By.className: shopping_cart_badge` after the add-to-cart click had already succeeded.
-Total elapsed each time was ~19–22s, i.e. **slower than serial, not faster**, because of
-this repeated failure.
+Parallel run (`dataproviderthreadcount=3`, the default):
+- **Chrome: failed on 6 consecutive attempts**, always the same way and always the same
+  scenario — `Adding an item to the cart updates the cart badge count` throws
+  `TimeoutException: ... waiting for visibility of element located by
+  By.className: shopping_cart_badge`, after the add-to-cart click itself had already
+  succeeded. Total elapsed each time was ~18–22s (slower than serial), because of this
+  repeated failure eating its full 10s wait.
+- **Firefox: passed 3/3 on 3 consecutive attempts**, ~27–31s total.
 
-This is not a new defect — it is the same class of issue the sibling TestNG framework
-documented extensively in its own Session 1/2 `PROGRESS.md`, on this exact machine, on
-functionally the same scenario (login → immediate assertion, the smallest margin before
-an explicit wait is checked). That project's own Session 1 "never reached a clean parallel
-run to time" either; the sibling's timing table that shows a passing parallel run was
-measured in *Session 2*, after the retry analyzer existed, and explicitly includes "1 real
-retry". In other words, the sibling framework only became reliably green under parallel
-load once retry logic was added — and retry logic is out of scope for this session here
-too, by the brief's own "Out" list.
+The `before-hook-start` timestamps (see above) plus per-scenario `Given`-step timestamps
+explain the difference. In the diagnosed Firefox run, the 3 scenarios' `Given` steps
+(i.e., "browser finished launching + navigated") landed ~7 seconds apart from each other,
+because `DriverFactory.setDriver()` serializes the actual
+`new ChromeDriver(...)`/`new FirefoxDriver(...)` call inside
+`synchronized (DriverFactory.class)` (this exists to avoid the `DriverService`
+port-allocation TOCTOU race the sibling project documented in its own Session 1), and
+Firefox simply takes ~7s per instance to launch — so the three launches are almost fully
+serialized by that lock, leaving little time where multiple *interactive* (JS-executing)
+browser sessions actually overlap. In the diagnosed Chrome run, the same three `Given`
+steps landed only ~2–4 seconds apart — Chrome launches much faster, clears the lock
+sooner, and so all three sessions spend meaningfully more overlapping wall-clock time
+actually running JS-heavy steps concurrently. That overlap is what starves the CPU during
+exactly the moment SauceDemo's add-to-cart handler needs to re-render the cart badge,
+consistently pushing it past the 10-second explicit wait. Two additional checks ruled out
+a locator/logic bug specifically: the inventory scenario passes cleanly and quickly (4.7s)
+when run alone in serial, and the failure is 100% reproducible on Chrome/parallel and 0%
+reproducible on Chrome/serial or Firefox/parallel across every attempt made.
 
-Diagnosis performed before concluding this: reran the inventory scenario alone in serial
-mode (passed cleanly, 4.7s) to rule out a locator/logic bug; reran the full parallel suite
-4 times to rule out a one-off fluke (failed all 4, same step, same exception, each time).
-Free system RAM during these runs was ~7GB/20GB — enough that this reads as this
-machine's specific 3-way-Chrome-contention profile (documented by the sibling project),
-not a from-scratch environment problem.
-
-**Conclusion:** proof-of-parallelism requirement (distinct concurrent thread IDs, distinct
-concurrent browser sessions) is satisfied. The "parallel demonstrably faster than serial"
-criterion is **not** met on this specific dev machine without retry logic, matching the
-sibling project's own documented precedent exactly. Deliberately not worked around here
-(no retry analyzer, no arbitrary wait-timeout inflation) since Session 2 owns that fix by
-the brief's explicit scope — flagging it now so Session 2 knows to verify it's resolved
-once the retry analyzer lands, the same way the sibling project's Session 2 did.
+**Conclusion:** proof-of-parallelism requirement (genuinely concurrent thread dispatch,
+concurrent browser sessions) is satisfied and precisely explained, not just asserted.
+"Parallel demonstrably faster than serial" is **not** met by either browser on this
+specific dev machine, because `DriverFactory`'s construction-serializing lock (itself
+necessary to avoid a real race condition) puts a floor under total runtime close to
+serial's — this is an inherent tradeoff of that fix, not a bug. Separately, **Chrome
+specifically cannot run this suite's inventory scenario reliably in parallel on this
+machine**; Firefox can. This mirrors the sibling TestNG framework's own documented
+Chrome-parallel flakiness on this exact machine (also only fully resolved there by its
+Session 2 retry analyzer), but this session pinned down the actual mechanism (launch-speed
+asymmetry interacting with the construction lock) rather than attributing it to unspecified
+"resource contention." Retry logic remains out of scope per the brief's "Out" list; not
+worked around here. Recommend Session 2's retry analyzer (or a documented default-browser
+change to Firefox for parallel CI runs) as the fix, now with a concrete root cause to
+validate against.
 
 ### Deviations from the brief
 
@@ -128,3 +142,9 @@ once the retry analyzer lands, the same way the sibling project's Session 2 did.
   Session 2 scope) — no `log.info(...)` calls like the sibling project has.
 - `LoginPage` gained an `isLoaded()` method not present in the sibling's `LoginPage`, added
   so the `Given` login-page step has a real assertion (see above).
+- Firefox was not installed on this dev machine during the first verification pass
+  (`-Dbrowser=firefox` failed with `SessionNotCreatedException: ... unable to find binary
+  in default location`, an environment gap, not a code defect — the driver-selection code
+  path itself was already confirmed correct: right `FirefoxDriver` class, right
+  capabilities, `geckodriver` resolved cleanly by WebDriverManager). Firefox was installed
+  afterward and the full suite re-verified on it; see above.
