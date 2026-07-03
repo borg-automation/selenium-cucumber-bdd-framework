@@ -18,6 +18,8 @@
         <cucumber.version>7.20.1</cucumber.version>
         <webdrivermanager.version>6.1.0</webdrivermanager.version>
         <jackson.version>2.19.0</jackson.version>
+        <log4j.version>2.26.0</log4j.version>
+        <extentreports.version>5.1.2</extentreports.version>
     </properties>
 
     <dependencies>
@@ -51,6 +53,21 @@
             <artifactId>jackson-databind</artifactId>
             <version>${jackson.version}</version>
             <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-core</artifactId>
+            <version>${log4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-api</artifactId>
+            <version>${log4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.aventstack</groupId>
+            <artifactId>extentreports</artifactId>
+            <version>${extentreports.version}</version>
         </dependency>
     </dependencies>
 

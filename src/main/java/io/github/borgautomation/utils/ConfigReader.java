@@ -43,4 +43,8 @@ public class ConfigReader {
     public int getImplicitWaitSeconds() {
         return Integer.parseInt(properties.getProperty("implicitWaitSeconds", "0"));
     }
+
+    public int getRetryCount() {
+        return Integer.parseInt(properties.getProperty("retryCount", "2"));
+    }
 }

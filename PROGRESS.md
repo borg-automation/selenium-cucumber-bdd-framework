@@ -1,5 +1,109 @@
 # Progress Log
 
+## Session 3 — Logging, ExtentReports, screenshot-on-failure, retry analyzer
+
+Implemented per `claude/BRIEF_cucumber_reporting_retry.md`.
+
+### Reused from the sibling TestNG framework, unchanged
+
+`ExtentManager` (single `ExtentReports` instance, `ThreadLocal<ExtentTest>`), `ScreenshotUtil`
+(`TakesScreenshot` → `OutputType.BASE64`), and `log4j2.xml` (console + rolling file appender to
+`logs/automation.log`, `%t` thread name in the pattern, 10 MB rollover) were copied verbatim
+from `selenium-testng-framework` — same thread-safety reasoning applies since Cucumber
+scenarios still run on TestNG's thread pool under the hood. `logs/` and `test-output/` added
+to `.gitignore`. `ConfigReader.getRetryCount()` (default 2, from `config.properties`'
+`retryCount`) also copied as-is.
+
+### Hook point is Cucumber's own `Hooks.java`, not a TestNG `ITestListener`
+
+Per the brief, `ExtentTest` node creation/closure and Log4j2 logging live in Cucumber's own
+`@Before`/`@After` (`Hooks.java`), keyed off the injected `Scenario` object — not TestNG's
+`ITestListener`, which is the sibling project's (different) attachment point. On failure, the
+screenshot is captured **once** as a base64 string and attached to both reports: decoded to
+bytes for Cucumber's native `scenario.attach(...)` (visible in Cucumber's own `pretty`/html
+output) and passed to `MediaEntityBuilder.createScreenCaptureFromBase64String(...)` for
+ExtentReports. This is intentionally two attachments, not one — confirmed both appear
+(`grep -c "data:image/png;base64"` on the report, and "Embedding Failure Screenshot" in
+Cucumber's console output).
+
+### Cucumber-Scenario-object quirk: `scenario.getName()` does not disambiguate Examples rows
+
+`scenario.getName()` returns the *Scenario Outline's title*, not the resolved row — every row
+of an Outline reports the identical name (confirmed empirically: all rows of "Adding various
+products..." showed as identical ExtentReport node names on the first attempt). This is
+different from the TestNG framework's data providers, where each `@Test` invocation's first
+parameter's `toString()` naturally differs per row. Fixed by appending the Examples row's own
+line number: `scenario.getName() + " (line " + scenario.getLine() + ")"` — `Scenario.getLine()`
+is documented (cucumber-java 7.20.1 sources) to return the Examples row's line, not the
+`Scenario Outline:` line, for an Outline expansion. Applied the same fix to `RetryAnalyzer`'s
+logging, using `PickleWrapper.getPickle().getLine()` (Cucumber-TestNG's own equivalent) since
+its `params[0].toString()` similarly collapses to the same quoted name for every row of an
+Outline.
+
+### Retry wiring: `IAnnotationTransformer` via `@Listeners` did not work; ServiceLoader did
+
+This was the flagged open question. Two things had to be resolved:
+
+1. **`@Listeners(AnnotationTransformer.class)` on `TestRunner` silently did nothing** — ran a
+   full Chrome-parallel suite (which reliably reproduces the known cart-badge race from
+   Sessions 1–2) with `retryCount=2` and zero `RetryAnalyzer` log lines appeared. Root cause:
+   `IAnnotationTransformer` needs to be known before TestNG reads the class's own `@Test`
+   annotations, and a `@Listeners` declared on that same class is discovered too late in that
+   pass — a chicken-and-egg problem specific to annotation transformers (ordinary listeners
+   like `ITestListener` don't have this issue since they only fire at runtime). This project
+   has no `testng.xml`, so the usual "declare it in the suite file" fix wasn't available.
+2. **Fix: register `AnnotationTransformer` via the `ServiceLoader` mechanism** —
+   `src/test/resources/META-INF/services/org.testng.ITestNGListener` containing
+   `io.github.borgautomation.listeners.AnnotationTransformer`. TestNG picks this up at JVM
+   startup, before any annotation scanning, so it's early enough. Rerunning the same
+   Chrome-parallel suite after this fix showed `RetryAnalyzer` firing correctly, with a
+   **distinct instance per Examples row** (verified via `System.identityHashCode(this)` in the
+   log — four different cart-badge rows produced four different instance IDs), i.e. TestNG
+   clones the underlying `ITestNGMethod` per `@DataProvider(parallel = true)` row, so retry
+   state does not bleed between rows. The documented fallback (`@Test(retryAnalyzer = ...)`
+   override on `TestRunner.runScenario`) was not needed in the end.
+
+A second bug surfaced once retries were actually firing: `Hooks.tearDown()` unconditionally
+called `ExtentManager.removeTest()`, but that hook runs on **every** attempt (Cucumber has no
+concept of "this attempt will be retried"), so by the time TestNG's `RetryAnalyzer.retry()` ran
+afterwards on the same thread, the ThreadLocal node was already gone and the "retrying" log
+message was silently dropped from the report (confirmed: `grep -c "Retrying"` on the report was
+0 before the fix). Fix: don't call `removeTest()` in `tearDown()` at all — the next `setUp()`
+(whether it's the retry itself or the next scenario on that thread) overwrites the ThreadLocal
+via `setTest()` regardless, so nothing leaks. After the fix, `grep -c "Retrying"` on the report
+was non-zero and matched the number of retried attempts in the log.
+
+### Verification
+
+- Serial (Firefox, `dataproviderthreadcount=1`): all 10 scenarios pass; `logs/automation.log`
+  and one `ExtentReport_*.html` node per scenario, correctly named with line numbers.
+- Parallel (Chrome, default threadcount 3), run three times: reliably reproduced the
+  pre-existing, load-sensitive cart-badge race documented in Sessions 1–2 — this served as the
+  "genuine timing/wait mismatch" required by the ground rules (no `Thread.sleep` needed; the
+  framework already has an authentic flaky scenario). Observed: most retried rows failed once
+  then passed on retry (confirmed in both `logs/automation.log` and the ExtentReport, each
+  showing the failed attempt's node with the "Retrying" warning followed by a separate passing
+  node for the same line number); one row twice exhausted both retries and surfaced as a final
+  `[ERROR]` — its ExtentReport node shows `Status.WARNING` retry log entries followed by a
+  final `fail()` with an embedded screenshot, and the same screenshot bytes were also attached
+  to Cucumber's own output. No cross-thread bleed observed at threadcount 3 (each
+  `TestNG-PoolService-N` thread's log lines and report nodes stayed on their own scenario).
+- `logs/automation.log` confirmed thread-tagged (`[TestNG-PoolService-1/2/3]` interleaved
+  correctly across concurrent scenarios).
+
+### Deviations from the brief
+
+- Brief's example `Hooks.tearDown()` code captures the screenshot as raw bytes then
+  re-encodes to base64 for ExtentReports; implemented instead as a single
+  `ScreenshotUtil.captureBase64()` call, decoding to bytes only for Cucumber's `attach()` —
+  same two-attachment outcome, one fewer `TakesScreenshot` round trip.
+- Added `Hooks.tearDownSuite()` (`@AfterAll`, Cucumber's own whole-run hook) to flush the
+  shared `ExtentReports` instance once after all scenarios finish in the JVM — not explicitly
+  in the brief's Hooks.java snippet, but required for the report to actually get written to
+  disk, and consistent with the brief's own suggestion to use "Cucumber's
+  `ConcurrentEventListener`/plugin system for anything that needs to observe the whole run"
+  (an `@AfterAll` static hook is the simpler, equivalent tool for this specific need).
+
 ## Session 2 — Data-driven scenarios
 
 Implemented per `claude/BRIEF_cucumber_data_driven.md`. Note on numbering: the brief calls

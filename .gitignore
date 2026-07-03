@@ -3,6 +3,8 @@ target/
 !**/src/main/**/target/
 !**/src/test/**/target/
 .kotlin
+logs/
+test-output/
 
 ### IntelliJ IDEA ###
 .idea/modules.xml
