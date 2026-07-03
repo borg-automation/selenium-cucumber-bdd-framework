@@ -47,4 +47,8 @@ public class ConfigReader {
     public int getRetryCount() {
         return Integer.parseInt(properties.getProperty("retryCount", "2"));
     }
+
+    public boolean isHeadless() {
+        return Boolean.parseBoolean(System.getProperty("headless", properties.getProperty("headless", "false")));
+    }
 }

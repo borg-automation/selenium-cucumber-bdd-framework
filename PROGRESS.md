@@ -1,5 +1,101 @@
 # Progress Log
 
+## Session 4 — GitHub Actions CI/CD
+
+Implemented per `claude/BRIEF_cucumber_github_actions.md`.
+
+### Headless support
+
+Identical shape to the sibling TestNG framework: `ConfigReader.isHeadless()` reads
+`-Dheadless=...` first, falling back to `config.properties`' `headless` key (default
+`false`). `DriverFactory.setDriver()` adds `--headless=new --no-sandbox
+--disable-dev-shm-usage --window-size=1920,1080` for Chrome and `-headless --width=1920
+--height=1080` for Firefox only when headless is on. Verified locally:
+
+- `mvn test -Dheadless=true -Dbrowser=chrome` — 13 run / 0 failures / 3 skipped (the 3
+  skipped are TestNG's own retry-attempt bookkeeping, not real skips — see below).
+- `mvn test -Dheadless=true -Dbrowser=firefox` — 10 run / 0 failures / 0 skipped, ~85s
+  (Firefox launch is simply slower; matches Session 1's serial-timing findings).
+
+### Confirmed CI-invoking Maven command
+
+`mvn test -Dbrowser=<browser> -Dheadless=true` — same as the brief's default guess, no
+adjustment needed. Surefire's `<includes>**/TestRunner.java</includes>` config from
+Session 1 means plain `mvn test` already runs the full Cucumber suite through
+`AbstractTestNGCucumberTests`; no `testng.xml` or extra Surefire wiring required.
+
+Tag filtering also confirmed working via `-Dcucumber.filter.tags=@smoke` **in addition
+to** `@CucumberOptions(tags = "not @wip")` on `TestRunner` — Cucumber ANDs the two filters
+together rather than one overriding the other (ran `mvn test -Dheadless=true
+-Dbrowser=chrome -Dcucumber.filter.tags=@smoke`, got 4/4 passing, correctly excluding the
+non-`@smoke` scenarios that the unfiltered run includes).
+
+### Retry-under-headless double-check (the brief's flagged risk)
+
+The brief called out that headless timing could interact with the retry count
+differently than local headed runs. Confirmed it does **not** break anything: the
+headless Chrome run above reproduced the same known cart-badge race documented in
+Sessions 1–3 (`Adding an item to the cart updates the cart badge count`), `RetryAnalyzer`
+fired once (`Attempt 2 failed (TimeoutException). Retrying - attempt 2 of 2.`) and the
+retried attempt passed — same ServiceLoader-registered `AnnotationTransformer` +
+`IRetryAnalyzer` wiring from Session 3, unchanged, working identically headless as
+headed. The "3 skipped" in the Surefire summary above are TestNG's own accounting for the
+2 failed-then-retried attempts across the run, not scenarios that were actually skipped
+(all scenarios that ran ended up passing).
+
+### Native Cucumber HTML report added
+
+`TestRunner`'s `@CucumberOptions.plugin` gained `"html:target/cucumber-reports/cucumber-report.html"`
+alongside the existing `"pretty"` — this wasn't configured in Session 3 (only console
+`pretty` output existed), so it's added now specifically to give the CI workflow a second
+report artifact to upload per the brief's step 4. Verified the file is generated correctly
+on every local run (`target/cucumber-reports/cucumber-report.html`, ~2.2 MB with the
+Chrome run's embedded failure screenshot).
+
+### Workflow file: `.github/workflows/ci.yml`
+
+Structurally matches the sibling TestNG framework's `ci.yml` (same job name `test`, same
+triggers, same JDK setup, same artifact-naming convention), with two differences forced
+by this project's actual shape:
+
+- Added the `browser: [chrome, firefox]` matrix (the sibling framework's checked-in
+  `ci.yml` runs Chrome only, despite its own brief mentioning a matrix — this project's
+  brief explicitly asked for the matrix, so it's included here).
+- Three artifact-upload steps instead of two: ExtentReports, the new Cucumber HTML
+  report, and logs — all `if: always()`, all named with a `-${{ matrix.browser }}` suffix
+  to avoid the two matrix legs overwriting each other's artifacts.
+
+### README added
+
+This project didn't have a `README.md` yet (Sessions 1–3 never added one). Added one now,
+matching the sibling framework's structure/tone, with the CI badge pointed at
+`borg-automation/selenium-cucumber-bdd-framework`'s own `ci.yml`.
+
+### Verification still pending an actual push
+
+Everything above was verified locally (compiles, both browsers pass headless, tag
+filtering works, retry fires and recovers under headless). The brief's acceptance
+criteria that require GitHub Actions itself to run — both matrix legs going green on a
+real push, downloaded artifacts opening correctly from the Actions UI, and the
+deliberately-broken-scenario/red-badge/recovery check — need an actual push to
+`origin/master` (and, for the break/fix check, a second push) to observe, which hasn't
+happened yet as of writing this section. Flagging this explicitly rather than claiming
+it's done: local verification de-risks the workflow content itself (correct command,
+correct paths, correct artifact names) but doesn't substitute for watching the real
+Actions run.
+
+### Deviations from the brief
+
+- Added the Chrome/Firefox matrix even though the sibling TestNG framework's own
+  committed `ci.yml` doesn't have one (see above) — followed this project's brief text
+  over the sibling's actual implementation, since the brief explicitly asked for it here.
+- Added `html:target/cucumber-reports/cucumber-report.html` to `@CucumberOptions.plugin`
+  as new configuration in this session (not present since Session 3), specifically to
+  give the CI workflow a second artifact to upload, per the brief's step 4 wording ("if
+  ... added in Session 3, upload that directory too") — since it wasn't added in Session
+  3, adding it now was the interpretation taken rather than skipping the second artifact
+  entirely.
+
 ## Session 3 — Logging, ExtentReports, screenshot-on-failure, retry analyzer
 
 Implemented per `claude/BRIEF_cucumber_reporting_retry.md`.

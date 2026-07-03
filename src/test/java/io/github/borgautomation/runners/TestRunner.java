@@ -13,7 +13,7 @@ import org.testng.annotations.DataProvider;
         features = "src/test/resources/features",
         glue = "io.github.borgautomation.stepdefinitions",
         tags = "not @wip",
-        plugin = {"pretty"}
+        plugin = {"pretty", "html:target/cucumber-reports/cucumber-report.html"}
 )
 public class TestRunner extends AbstractTestNGCucumberTests {
 
