@@ -17,6 +17,7 @@
         <testng.version>7.11.0</testng.version>
         <cucumber.version>7.20.1</cucumber.version>
         <webdrivermanager.version>6.1.0</webdrivermanager.version>
+        <jackson.version>2.19.0</jackson.version>
     </properties>
 
     <dependencies>
@@ -44,6 +45,12 @@
             <groupId>io.github.bonigarcia</groupId>
             <artifactId>webdrivermanager</artifactId>
             <version>${webdrivermanager.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>${jackson.version}</version>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 

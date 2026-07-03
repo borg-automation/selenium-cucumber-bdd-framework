@@ -20,13 +20,13 @@ public class LoginSteps {
         new LoginPage(DriverFactory.getDriver()).loginAs(username, password);
     }
 
-    @Then("I should see the inventory page")
-    public void iShouldSeeTheInventoryPage() {
-        Assert.assertTrue(new InventoryPage(DriverFactory.getDriver()).isLoaded());
-    }
-
-    @Then("I should see an error message {string}")
-    public void iShouldSeeAnErrorMessage(String expectedMessage) {
-        Assert.assertEquals(new LoginPage(DriverFactory.getDriver()).getErrorMessage(), expectedMessage);
+    @Then("I should see {string}")
+    public void iShouldSee(String expectedResult) {
+        if (expectedResult.startsWith("error: ")) {
+            String expectedMessage = expectedResult.substring("error: ".length());
+            Assert.assertEquals(new LoginPage(DriverFactory.getDriver()).getErrorMessage(), expectedMessage);
+        } else {
+            Assert.assertTrue(new InventoryPage(DriverFactory.getDriver()).isLoaded());
+        }
     }
 }

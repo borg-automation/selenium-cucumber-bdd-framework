@@ -1,5 +1,109 @@
 # Progress Log
 
+## Session 2 — Data-driven scenarios
+
+Implemented per `claude/BRIEF_cucumber_data_driven.md`. Note on numbering: the brief calls
+this "Session 3" if tracked sequentially against the sibling `selenium-testng-framework`'s
+own session count, but within this repo's own history it's Session 2 (this repo's Session 1
+was the core scaffold below). This log keeps this repo's own numbering.
+
+### Scenario Outline is primary; external-file DataTable is secondary/demonstrative
+
+Per the brief's explicit guidance: Gherkin's native `Scenario Outline` + `Examples` is the
+idiomatic, expected data-driven mechanism for a Cucumber framework, and is used for both
+new data-driven cases below. The external-JSON approach (step 3, optional) is implemented
+too, but only as a single demonstration scenario proving the capability exists for the rare
+case where a dataset genuinely needs to live outside the feature file — it is deliberately
+not the default pattern and does not replace the Examples tables.
+
+- **`login.feature`** — the single login scenario became a `Scenario Outline` with two
+  `Examples` blocks: "Valid logins" (`standard_user`, `problem_user` — no extra tag, so
+  only feature-level `@smoke` applies) and "Invalid logins" (`locked_out_user`,
+  `invalid_user` — tagged `@regression` directly above that `Examples:` line, not above
+  `Scenario Outline:`). This demonstrates row-group-level tagging correctly: `@regression`
+  applies only to the two invalid-login rows, not all four. Confirmed via
+  `-Dcucumber.filter.tags="@smoke"` (4 scenarios: the Outline expands per Examples row) vs
+  `-Dcucumber.filter.tags="@regression"` (includes only the 2 invalid-login rows from this
+  feature, alongside inventory.feature and the bulk-login feature).
+- The old two-step `Then` design (`I should see the inventory page` /
+  `I should see an error message {string}`) was collapsed into a single
+  `Then I should see "<expectedResult>"` step (`LoginSteps.iShouldSee`) that branches on an
+  `"error: "` prefix — asserts the error message if present, otherwise asserts the inventory
+  page loaded. This matches the brief's explicit guidance to avoid two near-duplicate steps.
+- **`inventory.feature`** — added a second scenario, a `Scenario Outline` varying which
+  product is added to the cart (`add-to-cart-sauce-labs-backpack` /
+  `-bike-light` / `-bolt-t-shirt` / `-fleece-jacket`, each asserting cart badge count `"1"`
+  since each row's `Background` is a fresh login). Chose "multiple products added to cart"
+  over checkout-form-validation because Session 1 only built `InventoryPage`, not a
+  checkout page object — reusing the existing page object avoids adding new page-object
+  logic for this session, per the brief's step 2 guidance. No new step definitions were
+  needed; the Outline reuses `InventorySteps`' existing two steps.
+- Total scenario count after both Outlines: 10 (was 3 in Session 1).
+
+### Optional step 3 implemented: external JSON dataset
+
+Added one demonstration scenario, `login-external-data.feature`'s
+"Bulk login validation from external dataset", tagged `@regression` (not `@smoke`, to keep
+the smoke suite fast). Reused the sibling `selenium-testng-framework`'s
+`login-users.json` shape/content and Jackson (`jackson-databind` 2.19.0, test scope) rather
+than inventing a new schema. `LoginTestData` (test-scope POJO, plain public fields, no
+annotations needed — Jackson binds by field name) lives under
+`src/test/java/.../models/`, matching the sibling's own placement. `BulkLoginSteps` reads
+`testdata/login-users.json` from the classpath and loops through each row doing a full
+login + assertion — this is a deliberate, noted exception to the "one page-object call per
+step" thinness rule from Session 1's ground rules: a bulk/dataset-driven step is inherently
+a loop over several page-object calls, and the brief explicitly frames this step as the
+exception, not the pattern to generalize.
+
+**Bug found and fixed:** the first version of this step reused one browser session across
+all four JSON rows (`driver.get(baseUrl)` between rows, no fresh driver). This reliably
+broke on the second row: SauceDemo's SPA left stale state after a first successful login
+and subsequent same-tab renavigation to `/`, silently failing to mount its error banner on
+the next login attempt — confirmed with temporary diagnostics (URL/page-source checks
+added then removed) showing `data-test="error"` never appeared in the DOM at all after the
+second attempt's click, even after a 3s settle. This is a different failure mode from
+Session 1's documented Chrome cart-badge parallel race (that one is timing/contention
+under load; this one was 100%-reproducible in complete isolation, on a single thread, with
+no other scenarios running). The fix: give each JSON row its own fresh driver instance
+(`DriverFactory.quitDriver()` + `DriverFactory.setDriver()` before each row) instead of
+reusing one session across repeated logins — verified reliable across multiple isolated
+runs after the fix. This is a heavier per-row cost (a full browser relaunch per JSON row)
+but correctness took priority over speed for a demonstration scenario, and it mirrors how
+every other scenario in this suite already gets its own fresh driver per Cucumber scenario
+via `Hooks`.
+
+### Verification performed
+
+- `mvn test -Ddataproviderthreadcount=1`: all 10 scenarios pass serially (confirmed clean
+  runs after the `BulkLoginSteps` fix above).
+- `-Dcucumber.filter.tags="@smoke"`: 4 scenarios (the login Outline's full expansion),
+  0 failures.
+- `-Dcucumber.filter.tags="@regression"`: 8 scenarios (inventory.feature's 5, the bulk-login
+  feature's 1, login.feature's 2 invalid-login rows), confirming Examples-block-level
+  tagging works as intended.
+- `mvn test -Dbrowser=firefox` (parallel, default `dataproviderthreadcount=3`): all 10
+  scenarios pass, 0 failures, exit code 0.
+- `mvn test` (parallel, Chrome, default thread count 3): intermittent cart-badge
+  `TimeoutException` failures recur (2-3 out of 10 scenarios per run, inconsistent between
+  runs) — this is the same Chrome-parallel JS-render-under-load race documented in Session
+  1's PROGRESS.md, now simply more visible because there are more cart-badge-asserting
+  scenarios post-expansion (5 vs. Session 1's 1). One serial (`dataproviderthreadcount=1`)
+  Chrome run also intermittently hit the same failure once, on a fleece-jacket row -
+  consistent with Session 1's finding that this is a load-sensitive JS re-render race, not a
+  logic bug, and reinforces that more total browser launches in one JVM run (even serial)
+  sustain enough machine load to occasionally trigger it. Not worked around here (retry
+  logic remains out of scope); still recommend Session 2/3's retry analyzer, or defaulting
+  to Firefox for parallel/CI runs, as previously noted.
+
+### Deviations from the brief
+
+- Session renumbering: brief refers to this work as "Session 3" in the two-repo program's
+  overall sequence; this repo's own `PROGRESS.md` keeps calling it "Session 2" since it's
+  the second session logged in this specific repo (see note above).
+- `BulkLoginSteps`'s per-row fresh-driver approach is heavier than the brief's suggested
+  "reuse session, loop through assertions" framing implied — necessary due to the stale-SPA
+  bug found above; noted here rather than silently deviating.
+
 ## Session 1 — Cucumber core scaffold
 
 Implemented per `claude/BRIEF_cucumber_core_scaffold.md`: Maven build (Selenium 4.33.0,
